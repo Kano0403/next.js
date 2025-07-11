@@ -13,6 +13,7 @@ import {
 import { openFileInEditor } from '../../next-devtools/server/launch-editor'
 import {
   getOriginalCodeFrame,
+  ignoreListAnonymousStackFramesIfSandwiched,
   type OriginalStackFrameResponse,
   type OriginalStackFramesRequest,
   type OriginalStackFramesResponse,
@@ -377,7 +378,7 @@ async function getSource(
   return undefined
 }
 
-export function getOriginalStackFrames({
+export async function getOriginalStackFrames({
   isServer,
   isEdgeServer,
   isAppDirectory,
@@ -396,33 +397,38 @@ export function getOriginalStackFrames({
   edgeServerStats: () => webpack.Stats | null
   rootDirectory: string
 }): Promise<OriginalStackFramesResponse> {
-  return Promise.all(
-    frames.map((frame) =>
-      getOriginalStackFrame({
-        isServer,
-        isEdgeServer,
-        isAppDirectory,
-        frame,
-        clientStats,
-        serverStats,
-        edgeServerStats,
-        rootDirectory,
-      }).then(
-        (value) => {
-          return {
-            status: 'fulfilled' as const,
-            value,
+  const frameResponses = await Promise.all(
+    frames.map(
+      (frame): Promise<OriginalStackFramesResponse[number]> =>
+        getOriginalStackFrame({
+          isServer,
+          isEdgeServer,
+          isAppDirectory,
+          frame,
+          clientStats,
+          serverStats,
+          edgeServerStats,
+          rootDirectory,
+        }).then(
+          (value) => {
+            return {
+              status: 'fulfilled',
+              value,
+            }
+          },
+          (reason) => {
+            return {
+              status: 'rejected',
+              reason: inspect(reason, { colors: false }),
+            }
           }
-        },
-        (reason) => {
-          return {
-            status: 'rejected' as const,
-            reason: inspect(reason, { colors: false }),
-          }
-        }
-      )
+        )
     )
   )
+
+  ignoreListAnonymousStackFramesIfSandwiched(frameResponses)
+
+  return frameResponses
 }
 
 async function getOriginalStackFrame({
