@@ -229,7 +229,7 @@ class InnerScrollAndFocusHandler extends React.Component<ScrollAndFocusHandlerPr
       focusAndScrollRef.segmentPaths = []
 
       // Use requestAnimationFrame to batch all DOM reads and writes
-      requestAnimationFrame(() => {
+      setTimeout(() => {
         // Batch all DOM reads at the beginning to minimize reflows
         const htmlElement = document.documentElement
         const viewportHeight = htmlElement.clientHeight
@@ -321,7 +321,7 @@ class InnerScrollAndFocusHandler extends React.Component<ScrollAndFocusHandlerPr
 
         // Mutate after scrolling so that it can be read by `handleSmoothScroll`
         focusAndScrollRef.onlyHashChange = false
-      })
+      }, 0)
     }
   }
 
