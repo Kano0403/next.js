@@ -128,12 +128,22 @@ const rectProperties = [
 ] as const
 /**
  * Check if a HTMLElement is hidden or fixed/sticky position
+ * @param element - The element to check
+ * @param computedStyle - Pre-computed style to avoid repeated getComputedStyle calls
+ * @param rect - Pre-computed bounding rect to avoid repeated getBoundingClientRect calls
  */
-function shouldSkipElement(element: HTMLElement) {
+function shouldSkipElement(
+  element: HTMLElement,
+  computedStyle?: CSSStyleDeclaration,
+  rect?: DOMRect
+) {
+  // Use provided computed style or calculate it
+  const style = computedStyle || getComputedStyle(element)
+
   // we ignore fixed or sticky positioned elements since they'll likely pass the "in-viewport" check
   // and will result in a situation we bail on scroll because of something like a fixed nav,
   // even though the actual page content is offscreen
-  if (['sticky', 'fixed'].includes(getComputedStyle(element).position)) {
+  if (['sticky', 'fixed'].includes(style.position)) {
     if (process.env.NODE_ENV === 'development') {
       console.warn(
         'Skipping auto-scroll behavior due to `position: sticky` or `position: fixed` on element:',
@@ -145,16 +155,8 @@ function shouldSkipElement(element: HTMLElement) {
 
   // Uses `getBoundingClientRect` to check if the element is hidden instead of `offsetParent`
   // because `offsetParent` doesn't consider document/body
-  const rect = element.getBoundingClientRect()
-  return rectProperties.every((item) => rect[item] === 0)
-}
-
-/**
- * Check if the top corner of the HTMLElement is in the viewport.
- */
-function topOfElementInViewport(element: HTMLElement, viewportHeight: number) {
-  const rect = element.getBoundingClientRect()
-  return rect.top >= 0 && rect.top <= viewportHeight
+  const boundingRect = rect || element.getBoundingClientRect()
+  return rectProperties.every((item) => boundingRect[item] === 0)
 }
 
 /**
@@ -221,71 +223,105 @@ class InnerScrollAndFocusHandler extends React.Component<ScrollAndFocusHandlerPr
         return
       }
 
-      // Verify if the element is a HTMLElement and if we want to consider it for scroll behavior.
-      // If the element is skipped, try to select the next sibling and try again.
-      while (!(domNode instanceof HTMLElement) || shouldSkipElement(domNode)) {
-        if (process.env.NODE_ENV !== 'production') {
-          if (domNode.parentElement?.localName === 'head') {
-            // TODO: We enter this state when metadata was rendered as part of the page or via Next.js.
-            // This is always a bug in Next.js and caused by React hoisting metadata.
-            // We need to replace `findDOMNode` in favor of Fragment Refs (when available) so that we can skip over metadata.
-          }
-        }
-
-        // No siblings found that match the criteria are found, so handle scroll higher up in the tree instead.
-        if (domNode.nextElementSibling === null) {
-          return
-        }
-        domNode = domNode.nextElementSibling
-      }
-
       // State is mutated to ensure that the focus and scroll is applied only once.
       focusAndScrollRef.apply = false
       focusAndScrollRef.hashFragment = null
       focusAndScrollRef.segmentPaths = []
 
-      handleSmoothScroll(
-        () => {
-          // In case of hash scroll, we only need to scroll the element into view
-          if (hashFragment) {
-            ;(domNode as HTMLElement).scrollIntoView()
+      // Use requestAnimationFrame to batch all DOM reads and writes
+      requestAnimationFrame(() => {
+        // Batch all DOM reads at the beginning to minimize reflows
+        const htmlElement = document.documentElement
+        const viewportHeight = htmlElement.clientHeight
+        const elementCache = new Map<
+          HTMLElement,
+          { style: CSSStyleDeclaration; rect: DOMRect }
+        >()
 
+        // Find the appropriate element while caching computed styles and rects
+        let currentNode = domNode
+        while (currentNode instanceof HTMLElement) {
+          const style = getComputedStyle(currentNode)
+          const rect = currentNode.getBoundingClientRect()
+          elementCache.set(currentNode, { style, rect })
+
+          if (!shouldSkipElement(currentNode, style, rect)) {
+            domNode = currentNode
+            break
+          }
+
+          if (process.env.NODE_ENV !== 'production') {
+            if (currentNode.parentElement?.localName === 'head') {
+              // TODO: We enter this state when metadata was rendered as part of the page or via Next.js.
+              // This is always a bug in Next.js and caused by React hoisting metadata.
+              // We need to replace `findDOMNode` in favor of Fragment Refs (when available) so that we can skip over metadata.
+            }
+          }
+
+          // No siblings found that match the criteria are found, so handle scroll higher up in the tree instead.
+          if (currentNode.nextElementSibling === null) {
             return
           }
-          // Store the current viewport height because reading `clientHeight` causes a reflow,
-          // and it won't change during this function.
-          const htmlElement = document.documentElement
-          const viewportHeight = htmlElement.clientHeight
-
-          // If the element's top edge is already in the viewport, exit early.
-          if (topOfElementInViewport(domNode as HTMLElement, viewportHeight)) {
-            return
-          }
-
-          // Otherwise, try scrolling go the top of the document to be backward compatible with pages
-          // scrollIntoView() called on `<html/>` element scrolls horizontally on chrome and firefox (that shouldn't happen)
-          // We could use it to scroll horizontally following RTL but that also seems to be broken - it will always scroll left
-          // scrollLeft = 0 also seems to ignore RTL and manually checking for RTL is too much hassle so we will scroll just vertically
-          htmlElement.scrollTop = 0
-
-          // Scroll to domNode if domNode is not in viewport when scrolled to top of document
-          if (!topOfElementInViewport(domNode as HTMLElement, viewportHeight)) {
-            // Scroll into view doesn't scroll horizontally by default when not needed
-            ;(domNode as HTMLElement).scrollIntoView()
-          }
-        },
-        {
-          // We will force layout by querying domNode position
-          dontForceLayout: true,
-          onlyHashChange: focusAndScrollRef.onlyHashChange,
+          currentNode = currentNode.nextElementSibling
         }
-      )
 
-      // Mutate after scrolling so that it can be read by `handleSmoothScroll`
-      focusAndScrollRef.onlyHashChange = false
+        // Ensure we have a valid HTMLElement
+        if (!(domNode instanceof HTMLElement)) {
+          return
+        }
 
-      // Set focus on the element
-      domNode.focus()
+        handleSmoothScroll(
+          () => {
+            // In case of hash scroll, we only need to scroll the element into view
+            if (hashFragment) {
+              ;(domNode as HTMLElement).scrollIntoView()
+              // Set focus on the element after scrolling
+              ;(domNode as HTMLElement).focus()
+              return
+            }
+
+            // Get cached rect or compute it if not cached
+            const cached = elementCache.get(domNode as HTMLElement)
+            const rect =
+              cached?.rect || (domNode as HTMLElement).getBoundingClientRect()
+            const elementTopInViewport =
+              rect.top >= 0 && rect.top <= viewportHeight
+
+            // If the element's top edge is already in the viewport, just focus and exit
+            if (elementTopInViewport) {
+              ;(domNode as HTMLElement).focus()
+              return
+            }
+
+            // Otherwise, try scrolling to the top of the document to be backward compatible with pages
+            // scrollIntoView() called on `<html/>` element scrolls horizontally on chrome and firefox (that shouldn't happen)
+            // We could use it to scroll horizontally following RTL but that also seems to be broken - it will always scroll left
+            // scrollLeft = 0 also seems to ignore RTL and manually checking for RTL is too much hassle so we will scroll just vertically
+            const currentScrollTop = htmlElement.scrollTop
+            htmlElement.scrollTop = 0
+
+            // After scrolling to top, check if element is now in viewport
+            // We can calculate this without another DOM read by adjusting the rect position
+            const adjustedTop = rect.top + currentScrollTop
+
+            if (adjustedTop > viewportHeight) {
+              // Element is still not in viewport, scroll it into view
+              ;(domNode as HTMLElement).scrollIntoView()
+            }
+
+            // Set focus on the element after all scrolling is complete
+            ;(domNode as HTMLElement).focus()
+          },
+          {
+            // We will force layout by querying domNode position
+            dontForceLayout: true,
+            onlyHashChange: focusAndScrollRef.onlyHashChange,
+          }
+        )
+
+        // Mutate after scrolling so that it can be read by `handleSmoothScroll`
+        focusAndScrollRef.onlyHashChange = false
+      })
     }
   }
 
